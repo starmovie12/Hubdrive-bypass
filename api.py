@@ -1,87 +1,74 @@
 from flask import Flask, request, jsonify
 import cloudscraper
 import re
+import os
 
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-# Cloudscraper setup (Mobile Browser Mode)
+# Scraper setup: Android Chrome ban kar request bhejega
 scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'android', 'desktop': False})
 
-# Jo links CHAHIYE
-WANTED_DOMAINS = ["r2.dev", "fsl-lover.buzz", "fsl-cdn-1.sbs", "fukggl.buzz", "cdn.fukggl.buzz"]
-
-# Jo links NAHI CHAHIYE
-IGNORE_DOMAINS = ["pixeldrain", "hubcdn", "workers.dev", ".zip"]
-
-def get_real_links(target_url):
+# --- HUBDRIVE SOLVER LOGIC ---
+def extract_hubcloud(url):
     try:
-        # Step 1: Main HubCloud Page visit
-        resp = scraper.get(target_url)
-        if resp.status_code != 200:
-            return {"error": "Main page load nahi hua"}
-            
-        # Regex se hidden 'Generate Link' URL dhundo
-        first_match = re.search(r'href="([^"]+hubcloud\.php\?[^"]+)"', resp.text)
+        # Request bhejo (Timeout thoda badhaya hai taaki slow net pe fail na ho)
+        response = scraper.get(url, timeout=15)
         
-        if not first_match:
-             # Fallback: Agar ID 'download' ho
-             first_match = re.search(r'id="download" href="([^"]+)"', resp.text)
+        # Status code check (Debugging ke liye)
+        if response.status_code != 200:
+            print(f"❌ Failed to fetch page: {response.status_code}")
+            return None
 
-        if not first_match:
-            return {"error": "Generate Link button nahi mila"}
-            
-        redirect_url = first_match.group(1).replace('&amp;', '&')
+        # Regex Update: Ab ye hubcloud.foo, .club, .space sab pakad lega
+        # Pattern: href="https://hubcloud.[kuchbhi]/drive/..."
+        pattern = r'href=["\'](https?://hubcloud\.[a-zA-Z0-9-]+\/drive/[^"\']+)["\']'
         
-        # Step 2: Redirect Page visit (Headers ke sath)
-        headers = {"Referer": target_url}
-        resp2 = scraper.get(redirect_url, headers=headers)
+        match = re.search(pattern, response.text)
         
-        # --- Step 3: MAGIC SEARCH (Regex) ---
-        page_content = resp2.text
-        found_links = set()
-        
-        # Regex to find links ending with token=...
-        matches = re.findall(r'(https?://[^"\s\'<>]+token=[a-zA-Z0-9_]+)', page_content)
-        for link in matches:
-            found_links.add(link)
-            
-        # Regex 2: Alternate format
-        matches2 = re.findall(r'(https?://[^"\s\'<>]+mkv\?[^"\s\'<>]+)', page_content)
-        for link in matches2:
-            found_links.add(link)
-
-        # Step 4: Filtering
-        final_list = []
-        for link in found_links:
-            # Check Filters
-            is_wanted = any(w in link for w in WANTED_DOMAINS)
-            is_ignored = any(i in link for i in IGNORE_DOMAINS)
-            
-            if is_wanted and not is_ignored:
-                clean_link = link.strip('"').strip("'")
-                final_list.append(clean_link)
-        
-        final_list.sort()
-        
-        return {
-            "status": "success", 
-            "total": len(final_list), 
-            "links": final_list
-        }
+        if match:
+            return match.group(1)
+        else:
+            # Fallback: Agar href me nahi mila, to shayad 'window.location' me ho
+            pattern_js = r'window\.location\.replace\(["\'](https?://hubcloud\.[^"\']+)["\']\)'
+            match_js = re.search(pattern_js, response.text)
+            if match_js:
+                return match_js.group(1)
+                
+        return None
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        print(f"❌ Error: {e}")
+        return None
 
-# --- API ROUTE ---
-@app.route('/get-links', methods=['GET'])
-def api_handler():
-    url = request.args.get('url')
-    if not url:
-        return jsonify({"error": "URL missing"}), 400
-        
-    result = get_real_links(url)
-    return jsonify(result)
+# --- HOME PAGE ---
+@app.route('/')
+def home():
+    return "HubDrive Solver API is Running! 🚀 Use /solve?url=YOUR_LINK"
+
+# --- API ENDPOINT ---
+@app.route('/solve', methods=['GET'])
+def solve():
+    target_url = request.args.get('url')
+    
+    if not target_url:
+        return jsonify({"status": "error", "message": "URL missing"}), 400
+
+    extracted = extract_hubcloud(target_url)
+
+    if extracted:
+        return jsonify({
+            "status": "success",
+            "original_url": target_url,
+            "hubcloud_link": extracted
+        })
+    else:
+        return jsonify({
+            "status": "fail",
+            "message": "Link nahi mila (Shayad Cloudflare protection hai ya link expire ho gaya)"
+        })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    # Web Server (Render) ke liye Port environment variable se lena zaroori hai
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
